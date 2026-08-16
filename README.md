@@ -124,4 +124,3 @@ The Client uses a non-recursive dashboard render path. Background dashboard upda
 - The dashboard shows whether the Pilot camera is currently recording based on the Camera App's MP4 activity status.
 - While Automatic Backup is enabled, the phone keeps a complete quality-filtered daily GPS track in the selected Backup folder as `dd-MM-yyyy/PHONE_GPS_dd-MM-yyyy.gpx`.
 - The daily GPX is updated about every 30 seconds and verified after writing.
-"# Camera-GPX-Monitor-Client" 

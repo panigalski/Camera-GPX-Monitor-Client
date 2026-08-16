@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.27
+- Fixed GitHub/JVM unit-test failures in `DashboardClientTest`: local unit tests now use the real `org.json` implementation (`org.json:json:20231013`) instead of Android's non-functional framework stubs.
+- Application/runtime dependencies are unchanged; the JSON-java dependency is `testImplementation` only.
+
 ## 1.10.26
 - Main Camera App Monitor now shows **Output Folder** on two lines: the label first, then the complete folder path.
 - Output Folder is explicitly multi-line, horizontally non-scrolling, non-ellipsized, and selectable so long Android storage paths remain fully visible and can be copied.

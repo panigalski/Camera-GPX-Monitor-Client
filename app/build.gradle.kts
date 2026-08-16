@@ -14,8 +14,8 @@ android {
         applicationId = "com.labpano.gpxclient"
         minSdk = 24
         targetSdk = 33
-        versionCode = 73
-        versionName = "1.10.26"
+        versionCode = 74
+        versionName = "1.10.27"
     }
     buildTypes {
         release {
@@ -33,4 +33,7 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // Local JVM tests cannot execute Android's stub org.json implementation.
+    // Use the real JSON-java implementation only on the unit-test runtime classpath.
+    testImplementation("org.json:json:20231013")
 }
