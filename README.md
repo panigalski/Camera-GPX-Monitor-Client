@@ -2,12 +2,20 @@
 
 Android companion app for the Labpano GPX Extractor running on a Pilot One camera.
 
-**Current version:** 1.10.20  
+**Current version:** 1.10.28  
 
 The Main Camera App Monitor reads the dedicated live `outputFolder` value and refreshes it during normal dashboard polling.
 **Minimum Android:** 7.0 (API 24)  
 **Target SDK:** 33
 
+
+
+## 1.10.28 Automatic Backup layout and per-MP4 reliability
+
+- While Automatic Backup is active, the complete phone track for each local day is written at the selected Backup root as `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx`.
+- A matching `dd-MM-yyyy/` folder is kept for that day. Each finalized MP4 backed up from the Main App queue is saved directly there as `<MP4-base-name>_backup.gpx`, for example `16-08-2026/260816_102735266_backup.gpx`.
+- Per-video folders use the timestamp embedded in the MP4 filename when available, so late processing after midnight does not move a clip into the wrong day.
+- Pending GPX retrieval now follows every Main App pagination page, preventing newer MP4 backups from being hidden behind older already-processed queue entries.
 
 ## 1.10.20 Fragment Storage live updates
 
@@ -46,9 +54,9 @@ Paired with Main 0.5.34. The displayed Fragment Storage value now comes from the
 - GOOD, FAILED and ERROR report alerts using the supplied MP3 sounds.
 - Pilot One `thermal_zone0` device-temperature monitoring through the Camera App API, including background alerts and a user-configurable warning threshold (73 °C default).
 - Opt-in smartphone contingency GPS collection in a foreground location service that is independent of Main App connection state.
-- Backup GPX files preserve every timestamp from the Camera App GPX and replace coordinates only.
-- Backup GPX files are saved under `dd-MM-yyyy/STATUS_dd-MM-yyyy/` in the selected folder.
-- Complete per-day phone GPS archive in the selected Backup folder: `dd-MM-yyyy/PHONE_GPS_dd-MM-yyyy.gpx`.
+- Per-video Backup GPX prefers preserving every Camera GPX timestamp while replacing coordinates with phone fixes; if complete timestamp matching is impossible, it still saves a truthful phone-track GPX from fixes collected during that video interval.
+- Per-video Backup GPX files are saved directly under `dd-MM-yyyy/` as `<MP4-base-name>_backup.gpx`.
+- Complete per-day phone GPS archive at the selected Backup root: `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx`.
 - Compact **Main Camera App Monitor** showing live Monitoring ON/OFF, the Main App OUTPUT folder, active purple transfer progress bars with a single activity + video filename line directly underneath, plus a short pre-transfer processing/GPX-generation line when applicable.
 - One-line **Pilot One Recording Status** (`Recording` red / `Ready` blue), a persistent **App Sounds** mute control, and simplified Current / Warning / Return temperature display.
 - With Main App 0.5.27+, recording/Monitoring/OUTPUT/transfer state uses a lightweight 250 ms live-status channel; Main App 0.5.30 adds per-file recording ownership plus a Camera lifecycle generation. Client 1.10.18 merges that realtime state monotonically and keeps explicit Camera recording state independent of transfer rows; legacy 0.5.27/0.5.28 compatibility remains for inference-only file-close/IMU-close states. Heavier storage, report, thermal and Bluetooth/GPS data remain on the 3-second full dashboard.
@@ -122,5 +130,5 @@ The Client uses a non-recursive dashboard render path. Background dashboard upda
 ## 1.9.7 recording status and daily phone GPX
 
 - The dashboard shows whether the Pilot camera is currently recording based on the Camera App's MP4 activity status.
-- While Automatic Backup is enabled, the phone keeps a complete quality-filtered daily GPS track in the selected Backup folder as `dd-MM-yyyy/PHONE_GPS_dd-MM-yyyy.gpx`.
+- While Automatic Backup is enabled, the phone keeps a complete quality-filtered daily GPS track at the selected Backup root as `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx`, while per-MP4 backup GPX files are stored under the matching `dd-MM-yyyy/` folder.
 - The daily GPX is updated about every 30 seconds and verified after writing.

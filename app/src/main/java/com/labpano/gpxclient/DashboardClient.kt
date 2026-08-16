@@ -54,10 +54,43 @@ class DashboardClient {
 
     fun fetchPendingGpx(baseAddress: String): List<PendingGpxItem> {
         val base = normalizeAddress(baseAddress)
-        val root = JSONObject(requestText("GET", "$base/api/v1/pending-gpx"))
-        validateApiVersion(root, "Pending GPX")
-        val array = root.optJSONArray("items") ?: JSONArray()
-        return (0 until array.length()).mapNotNull { index ->
+        val result = mutableListOf<PendingGpxItem>()
+        val seenIds = linkedSetOf<String>()
+        var offset = 0
+        var pageCount = 0
+
+        while (pageCount < MAX_PENDING_GPX_PAGES) {
+            val root = JSONObject(
+                requestText(
+                    "GET",
+                    "$base/api/v1/pending-gpx?limit=$PENDING_GPX_PAGE_SIZE&offset=$offset"
+                )
+            )
+            validateApiVersion(root, "Pending GPX")
+            val page = pendingGpxItems(root.optJSONArray("items") ?: JSONArray())
+            page.forEach { item ->
+                val dedupeKey = item.id.ifBlank {
+                    "${item.completedAt}|${item.videoName}|${item.gpxName}|${item.gpxSizeBytes}"
+                }
+                if (seenIds.add(dedupeKey)) result += item
+            }
+
+            val nextOffset = if (root.has("nextOffset") && !root.isNull("nextOffset")) {
+                root.optInt("nextOffset", -1)
+            } else {
+                -1
+            }
+            if (nextOffset <= offset) return result
+
+            offset = nextOffset
+            pageCount++
+        }
+
+        throw IllegalStateException("Pending GPX queue exceeded the client pagination safety limit")
+    }
+
+    internal fun pendingGpxItems(array: JSONArray): List<PendingGpxItem> =
+        (0 until array.length()).mapNotNull { index ->
             val value = array.optJSONObject(index) ?: return@mapNotNull null
             PendingGpxItem(
                 id = value.optString("id"),
@@ -71,7 +104,6 @@ class DashboardClient {
                 downloadUrl = value.optString("downloadUrl")
             )
         }
-    }
 
     fun deleteEntry(baseAddress: String, type: ReportType, entry: ReportEntry) {
         val base = normalizeAddress(baseAddress)
@@ -559,6 +591,8 @@ class DashboardClient {
 
     companion object {
         private const val DEFAULT_PORT = 1100
+        private const val PENDING_GPX_PAGE_SIZE = 500
+        private const val MAX_PENDING_GPX_PAGES = 100
         private const val CONNECT_TIMEOUT_MS = 5_000
         private const val READ_TIMEOUT_MS = 8_000
         private const val MAX_JSON_BYTES = 5L * 1024L * 1024L

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.28
+- Automatic Backup now writes the global daily phone track at the selected Backup root as `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx`.
+- Creates/uses a direct `dd-MM-yyyy/` subfolder for per-video backups and saves each MP4 backup as `<MP4-base-name>_backup.gpx` (for example `260816_102735266_backup.gpx`) with no extra GOOD/FAILED/ERROR directory layer.
+- Uses the MP4 filename timestamp for the date folder when available, falling back to the Main App completion timestamp.
+- Fixed pending-GPX pagination: the Client now reads every page exposed by Main App 0.5.40 instead of only the first page, so newer MP4s cannot be skipped after the queue grows.
+- If exact replacement of every Camera GPX timestamp is impossible but phone fixes exist during the video interval, the Client now saves those actual phone fixes as a direct-track fallback instead of omitting that MP4 backup entirely.
+- Added unit coverage for backup naming/date rules and pending-GPX item parsing.
+
 ## 1.10.27
 - Fixed GitHub/JVM unit-test failures in `DashboardClientTest`: local unit tests now use the real `org.json` implementation (`org.json:json:20231013`) instead of Android's non-functional framework stubs.
 - Application/runtime dependencies are unchanged; the JSON-java dependency is `testImplementation` only.

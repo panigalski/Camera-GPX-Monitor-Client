@@ -621,7 +621,7 @@ class MainActivity : Activity() {
             }
             addView(backupStatus)
             dailyPhoneGpxStatus = TextView(this@MainActivity).apply {
-                text = "Daily phone GPX: waiting for GPS backup to start"
+                text = "Global phone GPX: waiting for GPS backup to start"
                 textSize = 12f
                 setTextColor(Color.DKGRAY)
                 setPadding(0, 0, 0, dp(4))
@@ -1515,10 +1515,10 @@ class MainActivity : Activity() {
             val dailyError = prefs.getString(BackupGpsService.KEY_DAILY_GPX_ERROR, "").orEmpty()
             val dailyPath = prefs.getString(BackupGpsService.KEY_DAILY_GPX_LAST_PATH, "").orEmpty()
             dailyPhoneGpxStatus.text = when {
-                dailyError.isNotBlank() -> "Daily phone GPX: $dailyError"
-                dailyPath.isNotBlank() -> "Daily phone GPX: $dailyPath"
-                enabled -> "Daily phone GPX: collecting fixes; first save follows shortly"
-                else -> "Daily phone GPX: starts with automatic backup"
+                dailyError.isNotBlank() -> "Global phone GPX: $dailyError"
+                dailyPath.isNotBlank() -> "Global phone GPX: $dailyPath"
+                enabled -> "Global phone GPX: collecting fixes; first save follows shortly"
+                else -> "Global phone GPX: starts with automatic backup"
             }
             dailyPhoneGpxStatus.setTextColor(if (dailyError.isNotBlank()) Color.rgb(198, 40, 40) else Color.DKGRAY)
         }

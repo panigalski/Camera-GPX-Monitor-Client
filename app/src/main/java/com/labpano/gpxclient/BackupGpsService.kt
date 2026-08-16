@@ -65,6 +65,7 @@ class BackupGpsService : Service(), LocationListener {
     private var cameraPollFailures = 0
     private var nextCameraPollAt = 0L
     private var terminalStatus: String? = null
+    private var lastEnsuredBackupDate = ""
 
     private val gnssStatusCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
@@ -420,25 +421,64 @@ class BackupGpsService : Service(), LocationListener {
             "No smartphone GPS points cover ${iso(timestamps.first())} to ${iso(timestamps.last())}"
         }
 
-        setStatus("Replacing coordinates for $videoName • ${timestamps.size} camera timestamps • ${phonePoints.size} quality phone fixes")
-        val replacement = replaceCoordinates(sourceGpx, phonePoints)
-        require(replacement.replaced == replacement.timestampedPoints) {
-            "Only ${replacement.replaced} of ${replacement.timestampedPoints} timestamped points matched the smartphone timeline"
+        setStatus("Building phone backup for $videoName • ${timestamps.size} camera timestamps • ${phonePoints.size} quality phone fixes")
+        val exactReplacement = runCatching { replaceCoordinates(sourceGpx, phonePoints) }.getOrNull()
+        val backupXml: String
+        val backupSummary: String
+        if (exactReplacement != null) {
+            val replacedTimes = extractTrackPointTimes(exactReplacement.xml)
+            require(replacedTimes == timestamps) {
+                "Backup GPX timestamp verification failed; camera GPX timing was not preserved"
+            }
+            backupXml = exactReplacement.xml
+            backupSummary = "${exactReplacement.replaced}/${exactReplacement.timestampedPoints} camera timestamps matched"
+        } else {
+            // A temporary phone-GPS gap must not make the entire MP4 disappear from Automatic
+            // Backup. Preserve only truthful fixes actually collected during this video's Camera
+            // timestamp interval instead of inventing coordinates for unmatched timestamps.
+            val videoStart = timestamps.minOrNull()!!
+            val videoEnd = timestamps.maxOrNull()!!
+            val directPhonePoints = phonePoints.filter { it.time in videoStart..videoEnd }
+            require(directPhonePoints.isNotEmpty()) {
+                "No smartphone GPS fixes were collected during ${iso(videoStart)} to ${iso(videoEnd)}"
+            }
+            backupXml = buildPhoneOnlyVideoGpx(videoName, directPhonePoints)
+            backupSummary = "${directPhonePoints.size} phone fixes saved (direct phone-track fallback)"
         }
 
-        val replacedTimes = extractTrackPointTimes(replacement.xml)
-        require(replacedTimes == timestamps) {
-            "Backup GPX timestamp verification failed; camera GPX timing was not preserved"
-        }
-
-        val requestedName = videoName.replace(Regex("(?i)\\.mp4$"), "_backup.gpx")
-        val savedPath = writeDocument(item.status, requestedName, replacement.xml.toByteArray(Charsets.UTF_8))
+        val requestedName = BackupGpxLayout.perVideoFileName(videoName)
+        val videoDateFolder = BackupGpxLayout.dateFolderName(
+            videoName = videoName,
+            completedAtMillis = parseIso(item.completedAt)
+        )
+        val savedPath = writePerVideoGpx(
+            dateFolderName = videoDateFolder,
+            requestedName = requestedName,
+            bytes = backupXml.toByteArray(Charsets.UTF_8)
+        )
         markProcessed(key)
-        setStatus("Saved $savedPath • ${replacement.replaced}/${replacement.timestampedPoints} coordinates replaced • source ${item.status}")
+        setStatus("Saved $savedPath • $backupSummary • source ${item.status}")
         updateNotification("Saved $savedPath")
     }
 
     private data class Replacement(val xml: String, val replaced: Int, val timestampedPoints: Int)
+
+    private fun buildPhoneOnlyVideoGpx(videoName: String, points: List<Location>): String {
+        val trackName = File(videoName).nameWithoutExtension.ifBlank { "video" } + " backup"
+        val phonePoints = points.sortedBy { it.time }.map { point ->
+            PhoneGpsPoint(
+                time = point.time,
+                latitude = point.latitude,
+                longitude = point.longitude,
+                altitude = point.altitude.takeIf { point.hasAltitude() && it.isFinite() },
+                accuracyMeters = point.accuracy.takeIf { point.hasAccuracy() && it.isFinite() },
+                provider = point.provider ?: "unknown",
+                speedMetersPerSecond = point.speed.takeIf { point.hasSpeed() && it.isFinite() },
+                bearingDegrees = point.bearing.takeIf { point.hasBearing() && it.isFinite() }
+            )
+        }
+        return DailyPhoneGpxWriter.build(trackName, phonePoints)
+    }
 
     private fun replaceCoordinates(source: String, phonePoints: List<Location>): Replacement {
         val pointRegex = Regex("""<trkpt\b([^>]*)>(.*?)</trkpt>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
@@ -557,6 +597,7 @@ class BackupGpsService : Service(), LocationListener {
 
     private fun syncDailyPhoneGpxArchives() {
         if (!hasBackupFolderGrant()) return
+        ensureCurrentDateBackupFolder()
         val files = timelineLock.read {
             dailyTimelineDirectory.listFiles { file -> file.isFile && file.extension.equals("csv", true) }
                 .orEmpty()
@@ -584,6 +625,23 @@ class BackupGpsService : Service(), LocationListener {
                     "Daily phone GPX sync failed for ${file.nameWithoutExtension}: ${error.message ?: error.javaClass.simpleName}"
                 ).apply()
             }
+        }
+    }
+
+    private fun ensureCurrentDateBackupFolder() {
+        val dateName = SimpleDateFormat(DATE_FOLDER_PATTERN, Locale.US).format(Date())
+        if (lastEnsuredBackupDate == dateName) return
+        runCatching {
+            val treeText = prefs.getString(KEY_FOLDER, null) ?: error("Select a smartphone backup folder")
+            val tree = Uri.parse(treeText)
+            val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+            getOrCreateDirectory(root, dateName)
+            lastEnsuredBackupDate = dateName
+        }.onFailure { error ->
+            prefs.edit().putString(
+                KEY_DAILY_GPX_ERROR,
+                "Backup date folder creation failed for $dateName: ${error.message ?: error.javaClass.simpleName}"
+            ).apply()
         }
     }
 
@@ -694,21 +752,16 @@ class BackupGpsService : Service(), LocationListener {
     }
 
     /**
-     * Writes and verifies a temporary SAF document inside the same dated status hierarchy
-     * used by the Camera App. Example:
-     * selected-folder/02-08-2026/GOOD_02-08-2026/video_backup.gpx.
+     * Saves one phone-coordinate backup GPX for the matching MP4 directly in that MP4's
+     * local-date folder, e.g. selected-folder/16-08-2026/260816_102735266_backup.gpx.
      */
-    private fun writeDocument(sourceStatus: String, requestedName: String, bytes: ByteArray): String {
+    private fun writePerVideoGpx(dateFolderName: String, requestedName: String, bytes: ByteArray): String {
         val treeText = prefs.getString(KEY_FOLDER, null) ?: error("Select a smartphone backup folder")
         val tree = Uri.parse(treeText)
         val hasGrant = contentResolver.persistedUriPermissions.any { it.uri == tree && it.isWritePermission }
         require(hasGrant) { "Backup folder permission was lost; select the folder again" }
         val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-        val dateFolderName = SimpleDateFormat(DATE_FOLDER_PATTERN, Locale.US).format(Date())
-        val dateFolder = getOrCreateDirectory(root, dateFolderName)
-        val statusName = normalizedBackupStatus(sourceStatus)
-        val statusFolderName = "${statusName}_${dateFolderName}"
-        val parent = getOrCreateDirectory(dateFolder, statusFolderName)
+        val parent = getOrCreateDirectory(root, dateFolderName)
 
         val token = UUID.randomUUID().toString().take(8)
         val tempName = "_tmp_${token}_${requestedName}"
@@ -724,7 +777,7 @@ class BackupGpsService : Service(), LocationListener {
                 val oldName = "_previous_${token}_${requestedName}"
                 oldBackupUri = runCatching { DocumentsContract.renameDocument(contentResolver, existing, oldName) }.getOrNull()
                 if (oldBackupUri == null) {
-                    // If the provider cannot rename the existing valid file, preserve it and
+                    // If this SAF provider cannot rename the existing valid file, preserve it and
                     // create a collision-safe new backup instead of deleting data first.
                     finalName = nextAvailableName(parent, requestedName)
                 }
@@ -734,7 +787,7 @@ class BackupGpsService : Service(), LocationListener {
                 val finalUri = finalizeTemporaryDocument(parent, tempUri, finalName, bytes)
                 verifyDocument(finalUri, bytes)
                 oldBackupUri?.let { runCatching { DocumentsContract.deleteDocument(contentResolver, it) } }
-                return "$dateFolderName/$statusFolderName/$finalName"
+                return "$dateFolderName/$finalName"
             } catch (error: Throwable) {
                 if (oldBackupUri != null) {
                     runCatching { DocumentsContract.renameDocument(contentResolver, oldBackupUri, requestedName) }
@@ -748,8 +801,8 @@ class BackupGpsService : Service(), LocationListener {
     }
 
     /**
-     * Saves the complete smartphone track for one local calendar day directly in that day's
-     * backup folder, e.g. selected-folder/09-08-2026/PHONE_GPS_09-08-2026.gpx.
+     * Saves the complete quality-filtered smartphone track for one local calendar day directly
+     * in the selected Backup folder, e.g. selected-folder/PHONE_GPX_BACKUP_16-08-2026.gpx.
      */
     private fun writeDailyPhoneGpx(dateFolderName: String, bytes: ByteArray): String {
         val treeText = prefs.getString(KEY_FOLDER, null) ?: error("Select a smartphone backup folder")
@@ -757,8 +810,11 @@ class BackupGpsService : Service(), LocationListener {
         val hasGrant = contentResolver.persistedUriPermissions.any { it.uri == tree && it.isWritePermission }
         require(hasGrant) { "Backup folder permission was lost; select the folder again" }
         val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-        val parent = getOrCreateDirectory(root, dateFolderName)
-        val requestedName = "PHONE_GPS_${dateFolderName}.gpx"
+        // Keep the per-video destination ready for the same local day even before the first MP4
+        // finishes. The global daily GPX itself intentionally lives at the Backup root.
+        getOrCreateDirectory(root, dateFolderName)
+        val parent = root
+        val requestedName = BackupGpxLayout.dailyGlobalFileName(dateFolderName)
         val token = UUID.randomUUID().toString().take(8)
         val tempUri = createDocument(parent, "_tmp_daily_${token}_$requestedName")
         try {
@@ -768,7 +824,7 @@ class BackupGpsService : Service(), LocationListener {
             if (existing == null) {
                 val finalUri = finalizeTemporaryDocument(parent, tempUri, requestedName, bytes)
                 verifyDocument(finalUri, bytes)
-                return "$dateFolderName/$requestedName"
+                return requestedName
             }
 
             val previousName = "_previous_daily_${token}_$requestedName"
@@ -780,7 +836,7 @@ class BackupGpsService : Service(), LocationListener {
                     val finalUri = finalizeTemporaryDocument(parent, tempUri, requestedName, bytes)
                     verifyDocument(finalUri, bytes)
                     runCatching { DocumentsContract.deleteDocument(contentResolver, previous) }
-                    return "$dateFolderName/$requestedName"
+                    return requestedName
                 } catch (error: Throwable) {
                     runCatching { DocumentsContract.renameDocument(contentResolver, previous, requestedName) }
                     throw error
@@ -788,22 +844,15 @@ class BackupGpsService : Service(), LocationListener {
             }
 
             // Some SAF providers cannot rename. The verified internal daily log remains the source
-            // of truth, so an in-place rewrite is recoverable on the next 30-second sync if needed.
+            // of truth, so an in-place rewrite is recoverable on the next periodic sync if needed.
             writeBytes(existing, bytes)
             verifyDocument(existing, bytes)
             runCatching { DocumentsContract.deleteDocument(contentResolver, tempUri) }
-            return "$dateFolderName/$requestedName"
+            return requestedName
         } catch (error: Throwable) {
             runCatching { DocumentsContract.deleteDocument(contentResolver, tempUri) }
             throw error
         }
-    }
-
-    private fun normalizedBackupStatus(value: String): String = when (value.trim().uppercase(Locale.US)) {
-        "GOOD" -> "GOOD"
-        "FAILED" -> "FAILED"
-        "ERROR", "ERRORS" -> "ERROR"
-        else -> "ERROR"
     }
 
     private fun getOrCreateDirectory(parent: Uri, displayName: String): Uri {

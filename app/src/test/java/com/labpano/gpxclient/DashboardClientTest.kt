@@ -3,6 +3,7 @@ package com.labpano.gpxclient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import org.json.JSONArray
 import org.json.JSONObject
 
 class DashboardClientTest {
@@ -177,6 +178,20 @@ class DashboardClientTest {
         assertEquals("size", dashboard.fragmentStorage.limitType)
         assertEquals(10, dashboard.fragmentStorage.sizeGb)
         assertEquals("10 GB", dashboard.fragmentStorage.display)
+    }
+
+    @Test
+    fun parsesEveryPendingGpxItemOnAPage() {
+        val items = client.pendingGpxItems(JSONArray("""
+            [
+              {"id":"a","status":"GOOD","completedAt":"2026-08-16T10:30:00.000Z","videoName":"260816_102735266.mp4","videoPath":"/a.mp4","gpxName":"a.gpx","gpxPath":"/a.gpx","gpxSizeBytes":123,"downloadUrl":"/a"},
+              {"id":"b","status":"FAILED","completedAt":"2026-08-16T10:40:00.000Z","videoName":"260816_103735266.mp4","videoPath":"/b.mp4","gpxName":"b.gpx","gpxPath":"/b.gpx","gpxSizeBytes":456,"downloadUrl":"/b"}
+            ]
+        """.trimIndent()))
+
+        assertEquals(2, items.size)
+        assertEquals("260816_102735266.mp4", items[0].videoName)
+        assertEquals(456L, items[1].gpxSizeBytes)
     }
 
 }
