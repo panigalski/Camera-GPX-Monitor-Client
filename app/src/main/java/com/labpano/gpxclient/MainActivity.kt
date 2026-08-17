@@ -27,9 +27,11 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.*
 import org.json.JSONArray
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -40,6 +42,7 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     private enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING }
     private val worker = Executors.newSingleThreadScheduledExecutor()
+    private val gpxTransferWorker = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val client = DashboardClient()
     @Volatile private var currentServerAddress: String? = null
@@ -95,7 +98,13 @@ class MainActivity : Activity() {
     private lateinit var dailyPhoneGpxStatus: TextView
     private lateinit var gpsReceiverStatus: GpsStatusView
     private lateinit var backupToggle: Button
+    private lateinit var sendGpxButton: Button
+    private lateinit var sendGpxStatus: TextView
     private var backupInactiveBackgroundTint: ColorStateList? = null
+    @Volatile private var sendingGpxFiles = false
+    private var backupDiscoveryStarted = false
+    private var gpxSendStatusOverride: String? = null
+    private var lastGpxSendPendingCount = -1
     private lateinit var screenStatus: TextView
     private lateinit var screenToggle: Button
     private lateinit var soundToggle: Button
@@ -131,6 +140,15 @@ class MainActivity : Activity() {
         registerCameraSessionReceiver()
         mainHandler.removeCallbacks(gpsUiUpdater)
         mainHandler.post(gpsUiUpdater)
+        if (!backupDiscoveryStarted) {
+            backupDiscoveryStarted = true
+            runCatching {
+                gpxTransferWorker.execute {
+                    BackupGpxSendQueue.discoverExisting(this)
+                    postUi { updateSendGpxButton() }
+                }
+            }
+        }
     }
 
     override fun onResume() {
@@ -214,6 +232,7 @@ class MainActivity : Activity() {
         connectionGeneration++
         mainHandler.removeCallbacks(gpsUiUpdater)
         worker.shutdownNow()
+        gpxTransferWorker.shutdownNow()
         soundQueue.clear()
         activePlayer?.release()
         activePlayer = null
@@ -639,6 +658,18 @@ class MainActivity : Activity() {
                 ?: ColorStateList.valueOf(Color.rgb(224, 224, 224))
             updateBackupButton()
             addView(backupToggle)
+            sendGpxStatus = TextView(this@MainActivity).apply {
+                textSize = 12f
+                setTextColor(Color.DKGRAY)
+                setPadding(0, dp(8), 0, dp(4))
+            }
+            addView(sendGpxStatus)
+            sendGpxButton = Button(this@MainActivity).apply {
+                text = "Send GPX Files"
+                setOnClickListener { sendPendingGpxFiles() }
+            }
+            addView(sendGpxButton)
+            updateSendGpxButton()
         }
         content.addView(backupCard, cardParams(dp(8)))
 
@@ -1344,6 +1375,12 @@ class MainActivity : Activity() {
             getSharedPreferences(BackupGpsService.PREFS, MODE_PRIVATE).edit()
                 .putString(BackupGpsService.KEY_FOLDER, uri.toString()).apply()
             backupFolder.text = backupFolderLabel()
+            runCatching {
+                gpxTransferWorker.execute {
+                    BackupGpxSendQueue.discoverExisting(this)
+                    postUi { updateSendGpxButton() }
+                }
+            }
         }
     }
 
@@ -1523,7 +1560,133 @@ class MainActivity : Activity() {
             dailyPhoneGpxStatus.setTextColor(if (dailyError.isNotBlank()) Color.rgb(198, 40, 40) else Color.DKGRAY)
         }
         updateBackupButton()
+        updateSendGpxButton()
     }
+
+    private fun updateSendGpxButton() {
+        if (!::sendGpxButton.isInitialized || !::sendGpxStatus.isInitialized) return
+        val pending = BackupGpxSendQueue.pendingCount(this)
+        if (lastGpxSendPendingCount >= 0 && pending != lastGpxSendPendingCount) {
+            gpxSendStatusOverride = null
+        }
+        lastGpxSendPendingCount = pending
+        val connected = isConnected && connectionState == ConnectionState.CONNECTED && !currentServerAddress.isNullOrBlank()
+        sendGpxButton.text = "Send GPX Files"
+        sendGpxButton.isEnabled = !sendingGpxFiles && pending > 0 && connected
+        sendGpxButton.backgroundTintList = ColorStateList.valueOf(
+            when {
+                sendingGpxFiles -> Color.rgb(158, 158, 158)
+                pending > 0 && connected -> Color.rgb(76, 175, 80)
+                else -> Color.rgb(224, 224, 224)
+            }
+        )
+        sendGpxButton.setTextColor(if (sendGpxButton.isEnabled) Color.WHITE else Color.rgb(96, 96, 96))
+        if (!sendingGpxFiles) {
+            sendGpxStatus.text = gpxSendStatusOverride ?: when {
+                pending == 0 -> "GPX files to send: none"
+                !connected -> "GPX files waiting to send: $pending • connect to the Main App"
+                else -> "GPX files waiting to send: $pending"
+            }
+        }
+    }
+
+    private fun sendPendingGpxFiles() {
+        if (sendingGpxFiles) return
+        val server = currentServerAddress?.takeIf { isConnected && connectionState == ConnectionState.CONNECTED }
+        if (server.isNullOrBlank()) {
+            Toast.makeText(this, "Connect to the Main App first", Toast.LENGTH_LONG).show()
+            updateSendGpxButton()
+            return
+        }
+        val pending = BackupGpxSendQueue.pending(this)
+        if (pending.isEmpty()) {
+            updateSendGpxButton()
+            return
+        }
+        sendingGpxFiles = true
+        gpxSendStatusOverride = null
+        sendGpxStatus.text = "Sending 0/${pending.size} GPX files…"
+        updateSendGpxButton()
+
+        runCatching {
+            gpxTransferWorker.execute {
+                var sent = 0
+                try {
+                    pending.forEach { entry ->
+                        val bytes = readBackupGpxBytes(Uri.parse(entry.documentUri))
+                        val sha256 = sha256Hex(bytes)
+                        require(sha256.equals(entry.sha256, ignoreCase = true)) {
+                            "${entry.fileName} changed after it was queued; restart the app to rediscover it"
+                        }
+                        client.uploadBackupGpx(
+                            baseAddress = server,
+                            dateFolder = entry.dateFolder,
+                            fileName = entry.fileName,
+                            bytes = bytes,
+                            sha256 = sha256
+                        )
+                        BackupGpxSendQueue.markSent(this, entry.id)
+                        sent++
+                        postUi {
+                            sendGpxStatus.text = "Sending $sent/${pending.size} GPX files…"
+                        }
+                    }
+                    postUi {
+                        sendingGpxFiles = false
+                        val remaining = BackupGpxSendQueue.pendingCount(this)
+                        updateSendGpxButton()
+                        gpxSendStatusOverride = if (remaining == 0) {
+                            "All pending GPX backup files were copied to the camera Output Folder."
+                        } else {
+                            "$sent GPX files sent • $remaining new file(s) waiting"
+                        }
+                        lastGpxSendPendingCount = remaining
+                        sendGpxStatus.text = gpxSendStatusOverride
+                    }
+                } catch (error: Throwable) {
+                    postUi {
+                        sendingGpxFiles = false
+                        val remaining = BackupGpxSendQueue.pendingCount(this)
+                        updateSendGpxButton()
+                        gpxSendStatusOverride = "GPX send stopped after $sent file(s): ${error.message ?: error.javaClass.simpleName} • $remaining pending"
+                        lastGpxSendPendingCount = remaining
+                        sendGpxStatus.text = gpxSendStatusOverride
+                        Toast.makeText(this, "Could not send all GPX files: ${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }.onFailure { error ->
+            sendingGpxFiles = false
+            sendGpxStatus.text = "GPX send could not start: ${error.message ?: error.javaClass.simpleName}"
+            updateSendGpxButton()
+        }
+    }
+
+    private fun readBackupGpxBytes(uri: Uri): ByteArray {
+        val input = contentResolver.openInputStream(uri)
+            ?: error("Backup GPX is no longer readable; keep the selected Backup Folder permission")
+        return input.use { stream ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var total = 0L
+            while (true) {
+                val read = stream.read(buffer)
+                if (read < 0) break
+                total += read
+                require(total <= MAX_GPX_SEND_BYTES) { "Backup GPX exceeds the send safety limit" }
+                output.write(buffer, 0, read)
+            }
+            output.toByteArray().also { bytes ->
+                require(bytes.isNotEmpty()) { "Backup GPX is empty" }
+                require(bytes.copyOfRange(0, minOf(bytes.size, 4096)).toString(Charsets.UTF_8).contains("<gpx", true)) {
+                    "Backup file is not GPX"
+                }
+            }
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(Locale.US, it.toInt() and 0xff) }
 
     private fun updateBackupButton() {
         if (!::backupToggle.isInitialized) return
@@ -1659,6 +1822,7 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
+        private const val MAX_GPX_SEND_BYTES = 16L * 1024L * 1024L
         private const val PREFS = "client_settings"
         private const val KEY_ADDRESS = "server_address"
         private const val KEY_ADDRESS_HISTORY_JSON = "successful_server_addresses_json_v2"

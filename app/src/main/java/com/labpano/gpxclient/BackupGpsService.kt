@@ -787,6 +787,13 @@ class BackupGpsService : Service(), LocationListener {
                 val finalUri = finalizeTemporaryDocument(parent, tempUri, finalName, bytes)
                 verifyDocument(finalUri, bytes)
                 oldBackupUri?.let { runCatching { DocumentsContract.deleteDocument(contentResolver, it) } }
+                BackupGpxSendQueue.enqueue(
+                    context = this,
+                    dateFolder = dateFolderName,
+                    fileName = finalName,
+                    uri = finalUri,
+                    sizeBytes = bytes.size.toLong()
+                )
                 return "$dateFolderName/$finalName"
             } catch (error: Throwable) {
                 if (oldBackupUri != null) {

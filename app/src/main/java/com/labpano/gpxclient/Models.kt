@@ -237,3 +237,11 @@ data class PendingGpxItem(
     val gpxSizeBytes: Long,
     val downloadUrl: String
 )
+
+
+data class BackupGpxUploadResult(
+    val destination: String,
+    val sizeBytes: Long,
+    val sha256: String,
+    val alreadyPresent: Boolean
+)

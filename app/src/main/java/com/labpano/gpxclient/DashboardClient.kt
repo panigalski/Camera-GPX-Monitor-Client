@@ -105,6 +105,76 @@ class DashboardClient {
             )
         }
 
+
+    fun uploadBackupGpx(
+        baseAddress: String,
+        dateFolder: String,
+        fileName: String,
+        bytes: ByteArray,
+        sha256: String
+    ): BackupGpxUploadResult {
+        val base = normalizeAddress(baseAddress)
+        val query = listOf(
+            "subfolder" to dateFolder,
+            "filename" to fileName,
+            "sha256" to sha256
+        ).joinToString("&") { (key, value) ->
+            java.net.URLEncoder.encode(key, "UTF-8") + "=" + java.net.URLEncoder.encode(value, "UTF-8")
+        }
+        val connection = (URL("$base/api/v1/backup-gpx-upload?$query").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = GPX_UPLOAD_READ_TIMEOUT_MS
+            useCaches = false
+            instanceFollowRedirects = false
+            doOutput = true
+            setFixedLengthStreamingMode(bytes.size)
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Content-Type", "application/gpx+xml; charset=utf-8")
+            setRequestProperty("Connection", "close")
+        }
+        return try {
+            connection.outputStream.use { output ->
+                output.write(bytes)
+                output.flush()
+            }
+            val code = connection.responseCode
+            val input = if (code in 200..299) connection.inputStream else connection.errorStream
+            val response = input?.use { stream ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var total = 0L
+                while (true) {
+                    val read = stream.read(buffer)
+                    if (read < 0) break
+                    total += read
+                    require(total <= MAX_JSON_BYTES) { "Camera response is too large" }
+                    output.write(buffer, 0, read)
+                }
+                output.toString(Charsets.UTF_8.name())
+            }.orEmpty()
+            if (code !in 200..299) {
+                val message = runCatching { JSONObject(response).optString("message") }.getOrNull().orEmpty()
+                if (code == 404) {
+                    throw HttpStatusException(code, "Main App does not support Send GPX Files; install Main App 0.5.41 or newer")
+                }
+                throw HttpStatusException(code, message.ifBlank { "Camera returned HTTP $code" })
+            }
+            val root = JSONObject(response)
+            val returnedSha = root.optString("sha256")
+            require(returnedSha.equals(sha256, ignoreCase = true)) { "Camera GPX checksum verification failed" }
+            require(root.optLong("sizeBytes") == bytes.size.toLong()) { "Camera GPX size verification failed" }
+            BackupGpxUploadResult(
+                destination = root.optString("destination"),
+                sizeBytes = root.optLong("sizeBytes"),
+                sha256 = returnedSha,
+                alreadyPresent = root.optBoolean("alreadyPresent", false)
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     fun deleteEntry(baseAddress: String, type: ReportType, entry: ReportEntry) {
         val base = normalizeAddress(baseAddress)
         val query = listOf(
@@ -595,6 +665,7 @@ class DashboardClient {
         private const val MAX_PENDING_GPX_PAGES = 100
         private const val CONNECT_TIMEOUT_MS = 5_000
         private const val READ_TIMEOUT_MS = 8_000
+        private const val GPX_UPLOAD_READ_TIMEOUT_MS = 20_000
         private const val MAX_JSON_BYTES = 5L * 1024L * 1024L
         private const val MAX_SUPPORTED_API_VERSION = 3
         private const val MAX_STORAGE_WRITE_ALERTS = 50

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.10.29
+- Added a manual **Send GPX Files** button to Automatic Smartphone GPS Backup. The button is enabled only when the Client has unsent per-video `_backup.gpx` files and a live Main App connection; it is grey/disabled after all pending files are confirmed copied.
+- Every newly generated per-video backup is placed in a durable send queue. A new backup automatically makes the button available again; successful files are removed one-by-one so a partial failure retries only what remains.
+- Existing per-video backups in `dd-MM-yyyy/` folders are discovered and offered for sending after upgrade. The daily `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx` root file is intentionally not sent.
+- Uploads are checksum-verified end-to-end with SHA-256 and byte size before the Client marks a backup sent. A same-name/same-checksum camera file is idempotent success; a different same-name camera file is never silently overwritten.
+- Paired with Main App 0.5.41, which stores each uploaded backup in `OUTPUT/dd-MM-yyyy/<video>_backup.gpx`.
+
 ## 1.10.28
 - Automatic Backup now writes the global daily phone track at the selected Backup root as `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx`.
 - Creates/uses a direct `dd-MM-yyyy/` subfolder for per-video backups and saves each MP4 backup as `<MP4-base-name>_backup.gpx` (for example `260816_102735266_backup.gpx`) with no extra GOOD/FAILED/ERROR directory layer.
