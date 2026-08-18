@@ -29,6 +29,7 @@ import java.net.URL
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
@@ -629,51 +630,113 @@ class BackupGpsService : Service(), LocationListener {
         result.sortedBy { it.time }
     }
 
-    private fun loadTimeline(from: Long, to: Long): List<Location> = timelineLock.read {
-        val result = mutableListOf<Location>()
+    private fun loadTimeline(from: Long, to: Long): List<Location> {
+        val internal = timelineLock.read {
+            val result = mutableListOf<Location>()
 
-        fun addCsvLine(line: String, extended: Boolean) {
-            val parts = line.split(',', limit = if (extended) 8 else 6)
-            if (parts.size < 6) return
-            val time = parts[0].toLongOrNull() ?: return
-            if (time !in from..to) return
-            val latitude = parts[1].toDoubleOrNull() ?: return
-            val longitude = parts[2].toDoubleOrNull() ?: return
-            if (!latitude.isFinite() || !longitude.isFinite()) return
-            val altitude = parts.getOrNull(3)?.toDoubleOrNull()
-            val accuracy = parts.getOrNull(4)?.toFloatOrNull()
-            val provider = parts.getOrNull(5).orEmpty().ifBlank { "unknown" }
-            val speed = parts.getOrNull(6)?.toFloatOrNull()
-            val bearing = parts.getOrNull(7)?.toFloatOrNull()
-            result += Location(provider).apply {
-                this.time = time
-                this.latitude = latitude
-                this.longitude = longitude
-                if (altitude != null && altitude.isFinite()) this.altitude = altitude
-                if (accuracy != null && accuracy.isFinite()) this.accuracy = accuracy
-                if (speed != null && speed.isFinite()) this.speed = speed
-                if (bearing != null && bearing.isFinite()) this.bearing = bearing
-            }
-        }
-
-        // Fast recent timeline used by the live service.
-        if (timelineFile.exists()) {
-            timelineFile.useLines(Charsets.UTF_8) { lines -> lines.forEach { addCsvLine(it, false) } }
-        }
-
-        // Durable per-day internal logs are retained longer than the rolling timeline. Include them
-        // so a camera reconnect or delayed queue item cannot lose an otherwise archived phone track.
-        dailyTimelineDirectory.listFiles { file -> file.isFile && file.extension.equals("csv", true) }
-            .orEmpty()
-            .forEach { file ->
-                file.useLines(Charsets.UTF_8) { lines -> lines.forEach { addCsvLine(it, true) } }
+            fun addCsvLine(line: String, extended: Boolean) {
+                val parts = line.split(',', limit = if (extended) 8 else 6)
+                if (parts.size < 6) return
+                val time = parts[0].toLongOrNull() ?: return
+                if (time !in from..to) return
+                val latitude = parts[1].toDoubleOrNull() ?: return
+                val longitude = parts[2].toDoubleOrNull() ?: return
+                if (!latitude.isFinite() || !longitude.isFinite()) return
+                val altitude = parts.getOrNull(3)?.toDoubleOrNull()
+                val accuracy = parts.getOrNull(4)?.toFloatOrNull()
+                val provider = parts.getOrNull(5).orEmpty().ifBlank { "unknown" }
+                val speed = parts.getOrNull(6)?.toFloatOrNull()
+                val bearing = parts.getOrNull(7)?.toFloatOrNull()
+                result += Location(provider).apply {
+                    this.time = time
+                    this.latitude = latitude
+                    this.longitude = longitude
+                    if (altitude != null && altitude.isFinite()) this.altitude = altitude
+                    if (accuracy != null && accuracy.isFinite()) this.accuracy = accuracy
+                    if (speed != null && speed.isFinite()) this.speed = speed
+                    if (bearing != null && bearing.isFinite()) this.bearing = bearing
+                }
             }
 
-        memoryPoints.filterTo(result) { it.time in from..to }
-        result
-            .filter { it.latitude.isFinite() && it.longitude.isFinite() }
+            // Fast recent timeline used by the live service.
+            if (timelineFile.exists()) {
+                timelineFile.useLines(Charsets.UTF_8) { lines -> lines.forEach { addCsvLine(it, false) } }
+            }
+
+            // Durable per-day internal logs are retained for normal delayed processing.
+            dailyTimelineDirectory.listFiles { file -> file.isFile && file.extension.equals("csv", true) }
+                .orEmpty()
+                .forEach { file ->
+                    file.useLines(Charsets.UTF_8) { lines -> lines.forEach { addCsvLine(it, true) } }
+                }
+
+            memoryPoints.filterTo(result) { it.time in from..to }
+            result.toList()
+        }
+
+        // Main retains pending recordings for much longer than the hidden internal CSV timeline.
+        // For old/delayed queue items, recover from the user-visible daily GPX archive that Automatic
+        // Backup already wrote to the selected folder. This preserves the "as long as backup was active"
+        // contract without retaining months of duplicate CSV data in app-private storage.
+        val archived = if (from < System.currentTimeMillis() - DAILY_INTERNAL_RETENTION_MS || internal.isEmpty()) {
+            loadArchivedGlobalTimeline(from, to)
+        } else {
+            emptyList()
+        }
+
+        return (internal + archived)
+            .filter { it.time in from..to && it.latitude.isFinite() && it.longitude.isFinite() }
             .distinctBy { listOf(it.time, it.latitude, it.longitude, it.provider) }
             .sortedBy { it.time }
+    }
+
+    private fun loadArchivedGlobalTimeline(from: Long, to: Long): List<Location> {
+        val treeText = prefs.getString(KEY_FOLDER, null) ?: return emptyList()
+        val tree = runCatching { Uri.parse(treeText) }.getOrNull() ?: return emptyList()
+        val hasReadGrant = contentResolver.persistedUriPermissions.any { it.uri == tree && it.isReadPermission }
+        if (!hasReadGrant) return emptyList()
+        val root = runCatching {
+            DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        }.getOrNull() ?: return emptyList()
+
+        val dates = linkedSetOf<String>()
+        val calendar = Calendar.getInstance().apply {
+            timeInMillis = from
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val formatter = SimpleDateFormat(DATE_FOLDER_PATTERN, Locale.US)
+        while (calendar.timeInMillis <= to) {
+            dates += formatter.format(calendar.time)
+            calendar.add(Calendar.DAY_OF_MONTH, 1)
+        }
+        dates += formatter.format(Date(to))
+
+        val result = mutableListOf<Location>()
+        for (dateName in dates) {
+            val archiveName = BackupGpxLayout.dailyGlobalFileName(dateName)
+            val document = findChild(root, archiveName) ?: continue
+            runCatching {
+                contentResolver.openInputStream(document)?.bufferedReader(Charsets.UTF_8)?.useLines { lines ->
+                    lines.forEach { line ->
+                        val point = ArchivedPhoneGpxReader.parseTrackPointLine(line) ?: return@forEach
+                        if (point.time !in from..to) return@forEach
+                        result += Location(point.provider).apply {
+                            time = point.time
+                            latitude = point.latitude
+                            longitude = point.longitude
+                            point.altitude?.let { altitude = it }
+                            point.accuracyMeters?.let { accuracy = it }
+                            point.speedMetersPerSecond?.let { speed = it }
+                            point.bearingDegrees?.let { bearing = it }
+                        }
+                    }
+                }
+            }
+        }
+        return result
     }
 
     private fun pruneTimeline() {

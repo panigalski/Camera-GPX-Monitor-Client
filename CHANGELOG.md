@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.10.33
+
+- Full-release audit hardening: delayed per-video backup generation now falls back to the durable root `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx` archive when the app-private phone timeline has been pruned. This closes the previous 14-day internal-history vs 180-day Main pending-queue mismatch without retaining months of duplicate CSV data.
+- Added a parser regression for archived daily phone GPX points and corrected current-release/matched-Main documentation.
+
 ## 1.10.32
 
 - Fixed Automatic Backup status flicker after stopping. Dashboard refreshes and the periodic backup-state refresh now use one shared display policy, so a stopped backup remains `Automatic backup stopped` instead of alternating with `Automatic backup is off`.

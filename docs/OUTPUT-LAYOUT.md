@@ -1,6 +1,6 @@
 # Current Output Folder contract
 
-Main App 0.5.43 uses a **date-first** classified output structure:
+Main App 0.5.47 uses a **date-first** classified output structure:
 
 ```text
 OUTPUT/

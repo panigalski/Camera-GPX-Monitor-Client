@@ -2,11 +2,11 @@
 
 Android companion application for the Labpano GPX Extractor Main App. It displays Pilot/Main status, monitors recordings and transfers, collects contingency smartphone GPS, creates per-video backup GPX files, and can manually send those backups back to the camera Output Folder.
 
-**Current release:** 1.10.32 (`versionCode 79`)  
+**Current release:** 1.10.33 (`versionCode 80`)  
 **Package:** `com.labpano.gpxclient`  
 **Minimum Android:** 7.0 / API 24  
 **Target / compile SDK:** API 33  
-**Required matched Main release for the current Output contract:** 0.5.43
+**Required matched Main release for the current Output contract:** 0.5.47
 
 ## Main functions
 
@@ -14,6 +14,7 @@ Android companion application for the Labpano GPX Extractor Main App. It display
 - Displays Pilot recording state, Main monitoring state, full Output Folder path, transfer progress, storage/report health, temperature and diagnostics.
 - Displays Camera Fragment Storage information for Stitched, Unstitched and Google Street View modes using Main-provided Camera settings.
 - Runs optional **Automatic Backup** smartphone GPS collection independently of the Main connection.
+- Recovers delayed per-video backups from the retained daily `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx` archive when the shorter-lived internal timeline has already been pruned.
 - Writes one daily phone GPS archive at the selected Backup root.
 - Creates one per-video `_backup.gpx` file from phone fixes collected during the complete MP4 interval.
 - Densifies short phone-GPS intervals to 250 ms only across gaps `<= 5 s`; it does not bridge larger GPS outages.
@@ -32,7 +33,7 @@ BACKUP/
 
 The daily root GPX is not sent to the camera. Only per-video `_backup.gpx` files are queued by **Send GPX Files**.
 
-With Main App 0.5.43, a sent backup is stored beside its matching recording under:
+With Main App 0.5.47, a sent backup is stored beside its matching recording under:
 
 ```text
 OUTPUT/dd-MM-yyyy/GOOD|FAILED|ERROR/<video-base>_backup.gpx
