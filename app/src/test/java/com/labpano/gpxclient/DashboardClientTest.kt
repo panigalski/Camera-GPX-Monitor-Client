@@ -194,4 +194,25 @@ class DashboardClientTest {
         assertEquals(456L, items[1].gpxSizeBytes)
     }
 
+    @Test
+    fun parsesMediaOnlyErrorItemWithFullVideoInterval() {
+        val items = client.pendingGpxItems(JSONArray("""
+            [
+              {
+                "id":"err-1","status":"ERROR","completedAt":"2026-08-17T14:20:30.000Z",
+                "videoName":"260817_161856570.mp4","videoPath":"/output/ERROR/17-08-2026/260817_161856570.mp4",
+                "gpxName":"","gpxPath":"","gpxSizeBytes":0,"downloadUrl":"",
+                "videoStartMillis":1786976336570,"videoEndMillis":1786976430000
+              }
+            ]
+        """.trimIndent()))
+
+        assertEquals(1, items.size)
+        assertEquals("ERROR", items.single().status)
+        assertEquals(0L, items.single().gpxSizeBytes)
+        assertEquals("", items.single().downloadUrl)
+        assertEquals(1786976336570L, items.single().videoStartMillis)
+        assertEquals(1786976430000L, items.single().videoEndMillis)
+    }
+
 }

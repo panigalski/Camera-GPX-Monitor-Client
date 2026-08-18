@@ -31,6 +31,7 @@ class DashboardClientUploadTest {
                     val pieces = pair.split('=', limit = 2)
                     URLDecoder.decode(pieces[0], "UTF-8") to URLDecoder.decode(pieces.getOrElse(1) { "" }, "UTF-8")
                 }
+                assertEquals("GOOD", query["status"])
                 assertEquals("16-08-2026", query["subfolder"])
                 assertEquals("260816_102735266_backup.gpx", query["filename"])
                 assertEquals(sha, query["sha256"])
@@ -52,7 +53,7 @@ class DashboardClientUploadTest {
                 }
                 assertEquals(body.toList(), received.toList())
 
-                val responseBody = """{"ok":true,"destination":"/output/16-08-2026/260816_102735266_backup.gpx","sizeBytes":${body.size},"sha256":"$sha","alreadyPresent":false}""".toByteArray()
+                val responseBody = """{"ok":true,"destination":"/output/GOOD/16-08-2026/260816_102735266_backup.gpx","sizeBytes":${body.size},"sha256":"$sha","alreadyPresent":false}""".toByteArray()
                 val responseHeader = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${responseBody.size}\r\nConnection: close\r\n\r\n"
                 socket.getOutputStream().use { output ->
                     output.write(responseHeader.toByteArray(Charsets.ISO_8859_1))
@@ -64,6 +65,7 @@ class DashboardClientUploadTest {
         try {
             val result = DashboardClient().uploadBackupGpx(
                 baseAddress = "http://127.0.0.1:${server.localPort}",
+                status = "GOOD",
                 dateFolder = "16-08-2026",
                 fileName = "260816_102735266_backup.gpx",
                 bytes = body,

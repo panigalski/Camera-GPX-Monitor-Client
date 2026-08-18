@@ -38,13 +38,14 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
-import kotlin.math.abs
 
 /**
- * Collects a bounded smartphone location timeline and creates camera-GPX backups whose
- * timestamps/XML structure are preserved while every timestamped coordinate is replaced.
+ * Collects the smartphone location timeline used by Automatic Backup and creates one independent
+ * phone GPX for each finalized MP4. Main App 0.5.42+ supplies the full MP4 interval, so backup
+ * timing does not depend on the Camera GPX extraction result.
  */
 class BackupGpsService : Service(), LocationListener {
+    private val phonePointDensifier = PhoneGpsPointDensifier()
     private val executor = Executors.newSingleThreadScheduledExecutor()
     private val timelineLock = ReentrantReadWriteLock()
     private val memoryPoints = ArrayDeque<Location>()
@@ -118,7 +119,7 @@ class BackupGpsService : Service(), LocationListener {
 
         val locationLooper = locationThread.looper
         runCatching {
-            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1_000L, 0f, this, locationLooper)
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 250L, 0f, this, locationLooper)
         }
         runCatching {
             locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 2_000L, 0f, this, locationLooper)
@@ -136,7 +137,7 @@ class BackupGpsService : Service(), LocationListener {
             .putString(
                 KEY_STATUS,
                 if (cameraAttached) {
-                    "Automatic backup enabled • collecting phone GPS • waiting for finalized camera GPX"
+                    "Automatic backup enabled • collecting phone GPS • waiting for finalized camera recording"
                 } else {
                     "Automatic backup enabled • collecting contingency phone GPS • camera not connected"
                 }
@@ -340,10 +341,10 @@ class BackupGpsService : Service(), LocationListener {
             val unprocessed = queue.filterNot { processed.contains(itemKey(it)) }
             if (unprocessed.isEmpty()) {
                 if (queue.isEmpty()) {
-                    setStatus("Phone GPS timeline active • waiting for finalized camera GPX")
+                    setStatus("Phone GPS timeline active • waiting for finalized camera recording")
                     updateNotification("Collecting phone GPS • waiting for camera GPX")
                 } else {
-                    setStatus("Phone GPS timeline active • all finalized GPX files processed • latest: ${queue.last().videoName}")
+                    setStatus("Phone GPS timeline active • all finalized camera recordings processed • latest: ${queue.last().videoName}")
                 }
                 return
             }
@@ -353,7 +354,7 @@ class BackupGpsService : Service(), LocationListener {
             if (pending == null) {
                 val nextRetry = unprocessed.mapNotNull { retries[itemKey(it)]?.nextAttemptAt }.minOrNull() ?: now
                 val waitSeconds = ((nextRetry - now).coerceAtLeast(0L) + 999L) / 1_000L
-                setStatus("Phone GPS timeline active • ${unprocessed.size} camera GPX item(s) waiting for retry • next in ${waitSeconds}s")
+                setStatus("Phone GPS timeline active • ${unprocessed.size} camera recording(s) waiting for backup retry • next in ${waitSeconds}s")
                 return
             }
 
@@ -367,7 +368,7 @@ class BackupGpsService : Service(), LocationListener {
                     "Backup deferred for $videoName: ${error.message ?: error.javaClass.simpleName} • " +
                         "attempt ${retry.attempts}, retrying later while other files continue"
                 )
-                updateNotification("Deferred camera GPX: $videoName")
+                updateNotification("Deferred camera backup: $videoName")
             }
         } catch (error: Throwable) {
             cameraPollFailures++
@@ -390,18 +391,90 @@ class BackupGpsService : Service(), LocationListener {
     }
 
     private fun processPendingGpx(base: String, item: PendingGpxItem) {
-        require(item.downloadUrl.isNotBlank()) { "Camera queue item has no GPX download URL" }
         val key = itemKey(item)
         val videoName = item.videoName.ifBlank { item.gpxName.replace(Regex("(?i)\\.gpx$"), ".mp4") }
+        val interval = resolveVideoInterval(base, item)
+        require(interval.endMillis > interval.startMillis) { "Camera supplied an invalid MP4 time interval" }
+        require(interval.endMillis - interval.startMillis <= MAX_BACKUP_VIDEO_INTERVAL_MS) {
+            "Camera supplied an unreasonable MP4 time interval"
+        }
+
+        // The smartphone backup is an independent phone track. It must not inherit missing points,
+        // clock jumps, densification, or other timing defects from the Camera GPX. Main App 0.5.42+
+        // supplies the canonical *full MP4 interval* directly from the movie timeline.
+        val phoneLocations = loadTimeline(interval.startMillis, interval.endMillis)
+            .filter { it.time in interval.startMillis..interval.endMillis }
+            .sortedBy { it.time }
+        require(phoneLocations.isNotEmpty()) {
+            "No smartphone GPS fixes were collected during ${iso(interval.startMillis)} to ${iso(interval.endMillis)}"
+        }
+        val genuinePhonePoints = phoneLocations.map(::toPhoneGpsPoint)
+        val dense = phonePointDensifier.densify(genuinePhonePoints)
+
+        setStatus(
+            "Building phone backup for $videoName • ${genuinePhonePoints.size} real + " +
+                "${dense.interpolatedPointCount} interpolated phone points • " +
+                "${iso(interval.startMillis)} to ${iso(interval.endMillis)}${interval.sourceSuffix}"
+        )
+        val backupXml = buildPhoneOnlyVideoGpx(videoName, dense.points)
+        val requestedName = BackupGpxLayout.perVideoFileName(videoName)
+        val videoDateFolder = BackupGpxLayout.dateFolderName(
+            videoName = videoName,
+            completedAtMillis = parseIso(item.completedAt)
+        )
+        val savedPath = writePerVideoGpx(
+            status = item.status,
+            dateFolderName = videoDateFolder,
+            requestedName = requestedName,
+            bytes = backupXml.toByteArray(Charsets.UTF_8)
+        )
+        markProcessed(key)
+        setStatus(
+            "Saved $savedPath • ${genuinePhonePoints.size} real + ${dense.interpolatedPointCount} interpolated phone points • " +
+                "source ${item.status}"
+        )
+        updateNotification("Saved $savedPath")
+    }
+
+    private fun toPhoneGpsPoint(point: Location): PhoneGpsPoint = PhoneGpsPoint(
+        time = point.time,
+        latitude = point.latitude,
+        longitude = point.longitude,
+        altitude = point.altitude.takeIf { point.hasAltitude() && it.isFinite() },
+        accuracyMeters = point.accuracy.takeIf { point.hasAccuracy() && it.isFinite() },
+        provider = point.provider ?: "unknown",
+        speedMetersPerSecond = point.speed.takeIf { point.hasSpeed() && it.isFinite() },
+        bearingDegrees = point.bearing.takeIf { point.hasBearing() && it.isFinite() }
+    )
+
+    private fun buildPhoneOnlyVideoGpx(videoName: String, points: List<PhoneGpsPoint>): String {
+        val trackName = File(videoName).nameWithoutExtension.ifBlank { "video" } + " backup"
+        return DailyPhoneGpxWriter.build(trackName, points)
+    }
+
+    private data class VideoInterval(
+        val startMillis: Long,
+        val endMillis: Long,
+        val sourceSuffix: String = ""
+    )
+
+    private fun resolveVideoInterval(base: String, item: PendingGpxItem): VideoInterval {
+        val start = item.videoStartMillis
+        val end = item.videoEndMillis
+        if (start != null && end != null && start > 0L && end > start) {
+            return VideoInterval(start, end, "")
+        }
+
+        // Backward compatibility for Main App <= 0.5.41. Its queue has no movie interval, so the
+        // Camera GPX extent is the only available approximation. New matched releases never use
+        // this path.
+        require(item.downloadUrl.isNotBlank()) { "Camera queue item has no GPX download URL or video interval" }
         val absoluteUrl = if (item.downloadUrl.startsWith("http://", true) || item.downloadUrl.startsWith("https://", true)) {
             item.downloadUrl
         } else {
             base.trimEnd('/') + "/" + item.downloadUrl.trimStart('/')
         }
-
-        setStatus("Camera finalized ${item.status}: $videoName • downloading ${item.gpxName}")
-        updateNotification("Downloading camera GPX for $videoName")
-
+        setStatus("Legacy Main App: reading Camera GPX timing for $item.videoName")
         val sourceBytes = getBytes(absoluteUrl)
         if (item.gpxSizeBytes > 0L) {
             require(sourceBytes.size.toLong() == item.gpxSizeBytes) {
@@ -409,117 +482,13 @@ class BackupGpsService : Service(), LocationListener {
             }
         }
         val sourceGpx = sourceBytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
-        require(sourceGpx.contains("<gpx", true)) { "Downloaded file is not GPX" }
-
         val timestamps = extractTrackPointTimes(sourceGpx)
         require(timestamps.isNotEmpty()) { "Camera GPX contains no timestamped track points" }
-        val phonePoints = loadTimeline(
-            timestamps.minOrNull()!! - MATCH_MARGIN_MS,
-            timestamps.maxOrNull()!! + MATCH_MARGIN_MS
+        return VideoInterval(
+            startMillis = timestamps.minOrNull()!!,
+            endMillis = timestamps.maxOrNull()!!,
+            sourceSuffix = " • legacy Camera-GPX interval"
         )
-        require(phonePoints.isNotEmpty()) {
-            "No smartphone GPS points cover ${iso(timestamps.first())} to ${iso(timestamps.last())}"
-        }
-
-        setStatus("Building phone backup for $videoName • ${timestamps.size} camera timestamps • ${phonePoints.size} quality phone fixes")
-        val exactReplacement = runCatching { replaceCoordinates(sourceGpx, phonePoints) }.getOrNull()
-        val backupXml: String
-        val backupSummary: String
-        if (exactReplacement != null) {
-            val replacedTimes = extractTrackPointTimes(exactReplacement.xml)
-            require(replacedTimes == timestamps) {
-                "Backup GPX timestamp verification failed; camera GPX timing was not preserved"
-            }
-            backupXml = exactReplacement.xml
-            backupSummary = "${exactReplacement.replaced}/${exactReplacement.timestampedPoints} camera timestamps matched"
-        } else {
-            // A temporary phone-GPS gap must not make the entire MP4 disappear from Automatic
-            // Backup. Preserve only truthful fixes actually collected during this video's Camera
-            // timestamp interval instead of inventing coordinates for unmatched timestamps.
-            val videoStart = timestamps.minOrNull()!!
-            val videoEnd = timestamps.maxOrNull()!!
-            val directPhonePoints = phonePoints.filter { it.time in videoStart..videoEnd }
-            require(directPhonePoints.isNotEmpty()) {
-                "No smartphone GPS fixes were collected during ${iso(videoStart)} to ${iso(videoEnd)}"
-            }
-            backupXml = buildPhoneOnlyVideoGpx(videoName, directPhonePoints)
-            backupSummary = "${directPhonePoints.size} phone fixes saved (direct phone-track fallback)"
-        }
-
-        val requestedName = BackupGpxLayout.perVideoFileName(videoName)
-        val videoDateFolder = BackupGpxLayout.dateFolderName(
-            videoName = videoName,
-            completedAtMillis = parseIso(item.completedAt)
-        )
-        val savedPath = writePerVideoGpx(
-            dateFolderName = videoDateFolder,
-            requestedName = requestedName,
-            bytes = backupXml.toByteArray(Charsets.UTF_8)
-        )
-        markProcessed(key)
-        setStatus("Saved $savedPath • $backupSummary • source ${item.status}")
-        updateNotification("Saved $savedPath")
-    }
-
-    private data class Replacement(val xml: String, val replaced: Int, val timestampedPoints: Int)
-
-    private fun buildPhoneOnlyVideoGpx(videoName: String, points: List<Location>): String {
-        val trackName = File(videoName).nameWithoutExtension.ifBlank { "video" } + " backup"
-        val phonePoints = points.sortedBy { it.time }.map { point ->
-            PhoneGpsPoint(
-                time = point.time,
-                latitude = point.latitude,
-                longitude = point.longitude,
-                altitude = point.altitude.takeIf { point.hasAltitude() && it.isFinite() },
-                accuracyMeters = point.accuracy.takeIf { point.hasAccuracy() && it.isFinite() },
-                provider = point.provider ?: "unknown",
-                speedMetersPerSecond = point.speed.takeIf { point.hasSpeed() && it.isFinite() },
-                bearingDegrees = point.bearing.takeIf { point.hasBearing() && it.isFinite() }
-            )
-        }
-        return DailyPhoneGpxWriter.build(trackName, phonePoints)
-    }
-
-    private fun replaceCoordinates(source: String, phonePoints: List<Location>): Replacement {
-        val pointRegex = Regex("""<trkpt\b([^>]*)>(.*?)</trkpt>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        val timeRegex = Regex("""<time>\s*([^<]+?)\s*</time>""", RegexOption.IGNORE_CASE)
-        val latRegex = Regex("""\blat\s*=\s*["'][^"']*["']""", RegexOption.IGNORE_CASE)
-        val lonRegex = Regex("""\blon\s*=\s*["'][^"']*["']""", RegexOption.IGNORE_CASE)
-        val eleRegex = Regex("""<ele>\s*[^<]*\s*</ele>""", RegexOption.IGNORE_CASE)
-        var replaced = 0
-        var timestamped = 0
-        var cursor = 0
-        val out = StringBuilder(source.length + 256)
-
-        pointRegex.findAll(source).forEach { match ->
-            out.append(source, cursor, match.range.first)
-            var attributes = match.groupValues[1]
-            var body = match.groupValues[2]
-            val timestamp = timeRegex.find(body)?.groupValues?.get(1)?.let(::parseIso)
-            if (timestamp != null) {
-                timestamped++
-                val nearest = nearestLocation(phonePoints, timestamp)
-                if (nearest != null && abs(nearest.time - timestamp) <= MAX_MATCH_DISTANCE_MS) {
-                    val lat = String.format(Locale.US, "lat=\"%.8f\"", nearest.latitude)
-                    val lon = String.format(Locale.US, "lon=\"%.8f\"", nearest.longitude)
-                    attributes = if (latRegex.containsMatchIn(attributes)) attributes.replace(latRegex, lat) else "$attributes $lat"
-                    attributes = if (lonRegex.containsMatchIn(attributes)) attributes.replace(lonRegex, lon) else "$attributes $lon"
-                    if (nearest.hasAltitude()) {
-                        val ele = String.format(Locale.US, "<ele>%.3f</ele>", nearest.altitude)
-                        body = if (eleRegex.containsMatchIn(body)) body.replace(eleRegex, ele) else ele + body
-                    }
-                    replaced++
-                }
-            }
-            out.append("<trkpt").append(attributes).append('>').append(body).append("</trkpt>")
-            cursor = match.range.last + 1
-        }
-        out.append(source, cursor, source.length)
-        require(timestamped > 0) { "Camera GPX contains no parseable track-point timestamps" }
-        require(replaced == timestamped) {
-            "Smartphone timeline matched $replaced of $timestamped timestamped camera points"
-        }
-        return Replacement(out.toString(), replaced, timestamped)
     }
 
     private fun extractTrackPointTimes(gpx: String): List<Long> {
@@ -528,22 +497,6 @@ class BackupGpsService : Service(), LocationListener {
         return pointRegex.findAll(gpx).mapNotNull { point ->
             timeRegex.find(point.groupValues[1])?.groupValues?.get(1)?.let(::parseIso)
         }.toList()
-    }
-
-    private fun nearestLocation(sorted: List<Location>, time: Long): Location? {
-        if (sorted.isEmpty()) return null
-        var low = 0
-        var high = sorted.lastIndex
-        while (low <= high) {
-            val mid = (low + high).ushr(1)
-            if (sorted[mid].time < time) low = mid + 1 else high = mid - 1
-        }
-        val from = (low - 3).coerceAtLeast(0)
-        val to = (low + 3).coerceAtMost(sorted.lastIndex)
-        return (from..to).map { sorted[it] }.minByOrNull { point ->
-            val accuracyPenalty = if (point.hasAccuracy()) point.accuracy.toDouble() * ACCURACY_SCORE_MILLISECONDS_PER_METER else 0.0
-            abs(point.time - time).toDouble() + accuracyPenalty
-        }
     }
 
     private fun appendTimelineLocked(location: Location) {
@@ -678,27 +631,44 @@ class BackupGpsService : Service(), LocationListener {
 
     private fun loadTimeline(from: Long, to: Long): List<Location> = timelineLock.read {
         val result = mutableListOf<Location>()
-        if (timelineFile.exists()) {
-            timelineFile.useLines(Charsets.UTF_8) { lines ->
-                lines.forEach { line ->
-                    val parts = line.split(',', limit = 6)
-                    if (parts.size < 6) return@forEach
-                    val time = parts[0].toLongOrNull() ?: return@forEach
-                    if (time !in from..to) return@forEach
-                    val latitude = parts[1].toDoubleOrNull() ?: return@forEach
-                    val longitude = parts[2].toDoubleOrNull() ?: return@forEach
-                    val altitude = parts[3].toDoubleOrNull()
-                    val accuracy = parts[4].toFloatOrNull()
-                    result += Location(parts[5]).apply {
-                        this.time = time
-                        this.latitude = latitude
-                        this.longitude = longitude
-                        if (altitude != null && altitude.isFinite()) this.altitude = altitude
-                        if (accuracy != null && accuracy.isFinite()) this.accuracy = accuracy
-                    }
-                }
+
+        fun addCsvLine(line: String, extended: Boolean) {
+            val parts = line.split(',', limit = if (extended) 8 else 6)
+            if (parts.size < 6) return
+            val time = parts[0].toLongOrNull() ?: return
+            if (time !in from..to) return
+            val latitude = parts[1].toDoubleOrNull() ?: return
+            val longitude = parts[2].toDoubleOrNull() ?: return
+            if (!latitude.isFinite() || !longitude.isFinite()) return
+            val altitude = parts.getOrNull(3)?.toDoubleOrNull()
+            val accuracy = parts.getOrNull(4)?.toFloatOrNull()
+            val provider = parts.getOrNull(5).orEmpty().ifBlank { "unknown" }
+            val speed = parts.getOrNull(6)?.toFloatOrNull()
+            val bearing = parts.getOrNull(7)?.toFloatOrNull()
+            result += Location(provider).apply {
+                this.time = time
+                this.latitude = latitude
+                this.longitude = longitude
+                if (altitude != null && altitude.isFinite()) this.altitude = altitude
+                if (accuracy != null && accuracy.isFinite()) this.accuracy = accuracy
+                if (speed != null && speed.isFinite()) this.speed = speed
+                if (bearing != null && bearing.isFinite()) this.bearing = bearing
             }
         }
+
+        // Fast recent timeline used by the live service.
+        if (timelineFile.exists()) {
+            timelineFile.useLines(Charsets.UTF_8) { lines -> lines.forEach { addCsvLine(it, false) } }
+        }
+
+        // Durable per-day internal logs are retained longer than the rolling timeline. Include them
+        // so a camera reconnect or delayed queue item cannot lose an otherwise archived phone track.
+        dailyTimelineDirectory.listFiles { file -> file.isFile && file.extension.equals("csv", true) }
+            .orEmpty()
+            .forEach { file ->
+                file.useLines(Charsets.UTF_8) { lines -> lines.forEach { addCsvLine(it, true) } }
+            }
+
         memoryPoints.filterTo(result) { it.time in from..to }
         result
             .filter { it.latitude.isFinite() && it.longitude.isFinite() }
@@ -755,7 +725,12 @@ class BackupGpsService : Service(), LocationListener {
      * Saves one phone-coordinate backup GPX for the matching MP4 directly in that MP4's
      * local-date folder, e.g. selected-folder/16-08-2026/260816_102735266_backup.gpx.
      */
-    private fun writePerVideoGpx(dateFolderName: String, requestedName: String, bytes: ByteArray): String {
+    private fun writePerVideoGpx(
+        status: String,
+        dateFolderName: String,
+        requestedName: String,
+        bytes: ByteArray
+    ): String {
         val treeText = prefs.getString(KEY_FOLDER, null) ?: error("Select a smartphone backup folder")
         val tree = Uri.parse(treeText)
         val hasGrant = contentResolver.persistedUriPermissions.any { it.uri == tree && it.isWritePermission }
@@ -789,6 +764,7 @@ class BackupGpsService : Service(), LocationListener {
                 oldBackupUri?.let { runCatching { DocumentsContract.deleteDocument(contentResolver, it) } }
                 BackupGpxSendQueue.enqueue(
                     context = this,
+                    status = status,
                     dateFolder = dateFolderName,
                     fileName = finalName,
                     uri = finalUri,
@@ -1067,10 +1043,21 @@ class BackupGpsService : Service(), LocationListener {
         if (states.remove(key) != null) saveRetryStates(states)
     }
 
-    private fun itemKey(item: PendingGpxItem): String =
-        (item.id.ifBlank {
+    private fun itemKey(item: PendingGpxItem): String {
+        val raw = (item.id.ifBlank {
             "${item.completedAt}|${item.gpxPath}|${item.gpxName}|${item.gpxSizeBytes}|${item.videoName}"
         }).lowercase(Locale.US)
+        // 1.10.30 deliberately rebuilds recent backups that may have been produced by the old
+        // Camera-GPX-dependent algorithm. Keep the version prefix stable forever for recordings
+        // in the repair window so they are rebuilt exactly once, while older queue history (for
+        // which the retained phone timeline is normally gone) remains marked processed.
+        val completed = parseIso(item.completedAt)
+        return if (completed != null && completed >= BACKUP_TIMELINE_REPAIR_CUTOFF_MILLIS) {
+            "timeline-v3|$raw"
+        } else {
+            raw
+        }
+    }
 
     private fun processedSet(): LinkedHashSet<String> =
         LinkedHashSet(prefs.getStringSet(KEY_PROCESSED, emptySet()).orEmpty())
@@ -1160,13 +1147,14 @@ class BackupGpsService : Service(), LocationListener {
         private const val MAX_RETRY_STATE_ENTRIES = 500
         private const val TIMELINE_RETENTION_MS = 24L * 60L * 60L * 1_000L
         private const val DAILY_INTERNAL_RETENTION_MS = 14L * 24L * 60L * 60L * 1_000L
+        // 14 days before the 1.10.30 release. These recordings can still have durable phone
+        // timeline data and are safe to rebuild once with the repaired per-video algorithm.
+        private const val BACKUP_TIMELINE_REPAIR_CUTOFF_MILLIS = 1_785_801_600_000L // 2026-08-04T00:00:00Z
         private const val MEMORY_RETENTION_MS = 2L * 60L * 60L * 1_000L
-        private const val MATCH_MARGIN_MS = 2L * 60L * 1_000L
-        private const val MAX_MATCH_DISTANCE_MS = 30L * 1_000L
+        private const val MAX_BACKUP_VIDEO_INTERVAL_MS = 24L * 60L * 60L * 1_000L
         private const val MAX_ACCEPTED_ACCURACY_METERS = 100f
         private const val NETWORK_SUPPRESSION_AFTER_GPS_MS = 15_000L
         private const val MAX_REASONABLE_SPEED_METERS_PER_SECOND = 120.0
-        private const val ACCURACY_SCORE_MILLISECONDS_PER_METER = 50.0
         private const val MAX_GPX_DOWNLOAD_BYTES = 100L * 1024L * 1024L
         private const val CAMERA_FAILURE_BASE_DELAY_MS = 3_000L
         private const val CAMERA_FAILURE_MAX_DELAY_MS = 2L * 60L * 1_000L

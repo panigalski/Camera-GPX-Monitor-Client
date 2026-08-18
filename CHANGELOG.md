@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.10.31
+- Paired with Main App 0.5.43's date-first OUTPUT layout. Manual **Send GPX Files** uploads now resolve on the camera to `OUTPUT/dd-MM-yyyy/GOOD|FAILED|ERROR/`.
+- Keeps the phone-side Automatic Backup layout unchanged; only the camera upload destination changed.
+- Updated the compatibility message so the new layout requires Main App 0.5.43 or newer.
+
+## 1.10.30
+- Paired with Main App 0.5.42: per-video smartphone backups now use Main's full MP4 start/end interval and no longer inherit timestamps, missing intervals or clock jumps from the extracted Camera GPX.
+- Added a 250 ms phone-point densifier that preserves every real phone fix and interpolates only across gaps <= 5 seconds; longer phone-GPS outages remain visible.
+- Increased the foreground GPS request cadence to 250 ms where supported by the phone/location provider.
+- Added support for media-only ERROR queue rows, allowing a phone backup for an ERROR MP4 when its movie interval is still readable.
+- Versioned recent backup identities so pre-1.10.30 backups in the retained 14-day phone-GPS window can be rebuilt exactly once after upgrade, while older queue history stays marked processed.
+- **Send GPX Files** now carries GOOD/FAILED/ERROR classification and uploads each backup beside its recording under `OUTPUT/<STATUS>/dd-MM-yyyy/`.
+- Preserved full pending-queue pagination and the test-only JVM `org.json` dependency used by GitHub unit tests.
+
 ## 1.10.29
 - Added a manual **Send GPX Files** button to Automatic Smartphone GPS Backup. The button is enabled only when the Client has unsent per-video `_backup.gpx` files and a live Main App connection; it is grey/disabled after all pending files are confirmed copied.
 - Every newly generated per-video backup is placed in a durable send queue. A new backup automatically makes the button available again; successful files are removed one-by-one so a partial failure retries only what remains.

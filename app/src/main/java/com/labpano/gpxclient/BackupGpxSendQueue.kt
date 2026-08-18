@@ -12,6 +12,8 @@ import java.util.Locale
 object BackupGpxSendQueue {
     data class Entry(
         val id: String,
+        /** GOOD / FAILED / ERROR when known from the Main pending-media queue; blank for legacy files. */
+        val status: String,
         val dateFolder: String,
         val fileName: String,
         val documentUri: String,
@@ -27,6 +29,7 @@ object BackupGpxSendQueue {
 
     fun enqueue(
         context: Context,
+        status: String,
         dateFolder: String,
         fileName: String,
         uri: Uri,
@@ -34,7 +37,7 @@ object BackupGpxSendQueue {
         lastModified: Long = queryLastModified(context, uri),
         sha256: String = sha256(context, uri)
     ) {
-        val entry = buildEntry(dateFolder, fileName, uri, sizeBytes, lastModified, sha256) ?: return
+        val entry = buildEntry(status, dateFolder, fileName, uri, sizeBytes, lastModified, sha256) ?: return
         synchronized(lock) {
             val prefs = context.getSharedPreferences(BackupGpsService.PREFS, Context.MODE_PRIVATE)
             val sent = prefs.getStringSet(KEY_SENT_IDS, emptySet()).orEmpty()
@@ -71,6 +74,16 @@ object BackupGpxSendQueue {
         writePending(prefs, pending)
     }
 
+    fun markStatus(context: Context, id: String, status: String) = synchronized(lock) {
+        val normalized = status.trim().uppercase(Locale.US)
+        if (normalized !in ALLOWED_STATUSES) return@synchronized
+        val prefs = context.getSharedPreferences(BackupGpsService.PREFS, Context.MODE_PRIVATE)
+        val pending = readPending(prefs.getString(KEY_PENDING_JSON, "[]").orEmpty()).map { entry ->
+            if (entry.id == id) entry.copy(status = normalized) else entry
+        }
+        writePending(prefs, pending)
+    }
+
     /** One-time/occasional discovery makes pre-1.10.29 backup files available to the manual sender. */
     fun discoverExisting(context: Context) {
         val prefs = context.getSharedPreferences(BackupGpsService.PREFS, Context.MODE_PRIVATE)
@@ -89,7 +102,7 @@ object BackupGpxSendQueue {
                 .filter { !it.isDirectory && backupFileRegex.matches(it.name) }
                 .forEach { file ->
                     val digest = sha256(context, file.uri)
-                    buildEntry(folder.name, file.name, file.uri, file.sizeBytes, file.lastModified, digest)?.let(discovered::add)
+                    buildEntry("", folder.name, file.name, file.uri, file.sizeBytes, file.lastModified, digest)?.let(discovered::add)
                 }
         }
         if (discovered.isEmpty()) return
@@ -103,6 +116,7 @@ object BackupGpxSendQueue {
     }
 
     private fun buildEntry(
+        status: String,
         dateFolder: String,
         fileName: String,
         uri: Uri,
@@ -111,11 +125,13 @@ object BackupGpxSendQueue {
         sha256: String
     ): Entry? {
         if (!dateFolderRegex.matches(dateFolder) || !backupFileRegex.matches(fileName)) return null
+        val normalizedStatus = status.trim().uppercase(Locale.US).takeIf { it in ALLOWED_STATUSES }.orEmpty()
         val normalizedSha = sha256.lowercase(Locale.US)
         if (!normalizedSha.matches(SHA256_REGEX)) return null
         val id = fingerprint(dateFolder, fileName, uri.toString(), normalizedSha)
         return Entry(
             id = id,
+            status = normalizedStatus,
             dateFolder = dateFolder,
             fileName = fileName,
             documentUri = uri.toString(),
@@ -127,9 +143,15 @@ object BackupGpxSendQueue {
     }
 
     private fun mergeEntry(pending: MutableList<Entry>, entry: Entry) {
+        // One date-folder/file-name pair is one logical camera-upload item. SAF providers may
+        // return a new document URI when an existing backup is atomically replaced, especially
+        // when 1.10.30 regenerates a backup previously produced by the old timing algorithm.
+        // Remove the old logical entry even if its URI/checksum changed so the Send button never
+        // gets stuck on a stale renamed/deleted document.
         pending.removeAll {
             it.id == entry.id ||
-                (it.dateFolder == entry.dateFolder && it.fileName == entry.fileName && it.documentUri == entry.documentUri)
+                (it.dateFolder.equals(entry.dateFolder, ignoreCase = true) &&
+                    it.fileName.equals(entry.fileName, ignoreCase = true))
         }
         pending += entry
         while (pending.size > MAX_PENDING) pending.removeAt(0)
@@ -220,6 +242,7 @@ object BackupGpxSendQueue {
             val item = array.optJSONObject(index) ?: return@mapNotNull null
             val entry = Entry(
                 id = item.optString("id"),
+                status = item.optString("status").trim().uppercase(Locale.US).takeIf { it in ALLOWED_STATUSES }.orEmpty(),
                 dateFolder = item.optString("dateFolder"),
                 fileName = item.optString("fileName"),
                 documentUri = item.optString("documentUri"),
@@ -240,6 +263,7 @@ object BackupGpxSendQueue {
         entries.takeLast(MAX_PENDING).forEach { entry ->
             put(JSONObject().apply {
                 put("id", entry.id)
+                put("status", entry.status)
                 put("dateFolder", entry.dateFolder)
                 put("fileName", entry.fileName)
                 put("documentUri", entry.documentUri)
@@ -256,6 +280,7 @@ object BackupGpxSendQueue {
     }
 
     private val SHA256_REGEX = Regex("^[0-9a-f]{64}$")
+    private val ALLOWED_STATUSES = setOf("GOOD", "FAILED", "ERROR")
     private const val KEY_PENDING_JSON = "backup_gpx_camera_send_pending_v1"
     private const val KEY_SENT_IDS = "backup_gpx_camera_send_sent_ids_v1"
     private const val MAX_PENDING = 6_000

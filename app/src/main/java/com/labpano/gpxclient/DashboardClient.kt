@@ -63,7 +63,7 @@ class DashboardClient {
             val root = JSONObject(
                 requestText(
                     "GET",
-                    "$base/api/v1/pending-gpx?limit=$PENDING_GPX_PAGE_SIZE&offset=$offset"
+                    "$base/api/v1/pending-gpx?limit=$PENDING_GPX_PAGE_SIZE&offset=$offset&includeMediaOnly=1"
                 )
             )
             validateApiVersion(root, "Pending GPX")
@@ -101,13 +101,20 @@ class DashboardClient {
                 gpxName = value.optString("gpxName"),
                 gpxPath = value.optString("gpxPath"),
                 gpxSizeBytes = value.optLong("gpxSizeBytes"),
-                downloadUrl = value.optString("downloadUrl")
+                downloadUrl = value.optString("downloadUrl"),
+                videoStartMillis = value.optLong("videoStartMillis").takeIf {
+                    value.has("videoStartMillis") && !value.isNull("videoStartMillis") && it > 0L
+                },
+                videoEndMillis = value.optLong("videoEndMillis").takeIf {
+                    value.has("videoEndMillis") && !value.isNull("videoEndMillis") && it > 0L
+                }
             )
         }
 
 
     fun uploadBackupGpx(
         baseAddress: String,
+        status: String,
         dateFolder: String,
         fileName: String,
         bytes: ByteArray,
@@ -115,6 +122,7 @@ class DashboardClient {
     ): BackupGpxUploadResult {
         val base = normalizeAddress(baseAddress)
         val query = listOf(
+            "status" to status,
             "subfolder" to dateFolder,
             "filename" to fileName,
             "sha256" to sha256
@@ -156,7 +164,7 @@ class DashboardClient {
             if (code !in 200..299) {
                 val message = runCatching { JSONObject(response).optString("message") }.getOrNull().orEmpty()
                 if (code == 404) {
-                    throw HttpStatusException(code, "Main App does not support Send GPX Files; install Main App 0.5.41 or newer")
+                    throw HttpStatusException(code, "Main App does not support Send GPX Files; install Main App 0.5.43 or newer")
                 }
                 throw HttpStatusException(code, message.ifBlank { "Camera returned HTTP $code" })
             }

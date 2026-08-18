@@ -235,7 +235,10 @@ data class PendingGpxItem(
     val gpxName: String,
     val gpxPath: String,
     val gpxSizeBytes: Long,
-    val downloadUrl: String
+    val downloadUrl: String,
+    /** Canonical full MP4 interval supplied by Main App 0.5.42+. */
+    val videoStartMillis: Long? = null,
+    val videoEndMillis: Long? = null
 )
 
 

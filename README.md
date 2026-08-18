@@ -2,12 +2,27 @@
 
 Android companion app for the Labpano GPX Extractor running on a Pilot One camera.
 
-**Current version:** 1.10.28  
+**Current version:** 1.10.31  
 
 The Main Camera App Monitor reads the dedicated live `outputFolder` value and refreshes it during normal dashboard polling.
 **Minimum Android:** 7.0 (API 24)  
 **Target SDK:** 33
 
+
+
+
+## 1.10.31 camera OUTPUT layout pairing
+
+- Paired with Main App 0.5.43. **Send GPX Files** now places each phone backup at `OUTPUT/dd-MM-yyyy/GOOD|FAILED|ERROR/` on the camera.
+- The phone-side backup layout remains unchanged.
+
+## 1.10.30 per-video phone GPX timeline repair
+
+- Paired with Main App 0.5.42. Per-video phone backups use the full MP4 start/end interval supplied by Main and no longer clone or inherit Camera-GPX timestamps.
+- Every genuine phone fix collected while Automatic Backup was active is retained. Normal phone cadence is densified to 250 ms only across gaps up to 5 seconds; a phone-GPS outage greater than 5 seconds is never interpolated away. Interpolated points are marked with provider `interpolated`.
+- Recent backup identities are versioned for the timeline repair, so recordings in the retained 14-day phone-GPS window that were previously marked processed by 1.10.29 can be rebuilt exactly once with the corrected algorithm; older history stays marked processed.
+- ERROR recordings are also eligible for phone backup when Main can expose a valid movie interval, even if Camera GPX extraction failed.
+- **Send GPX Files** targets the matching `OUTPUT/<GOOD|FAILED|ERROR>/dd-MM-yyyy/` camera folder and preserves queue status across restarts.
 
 
 ## 1.10.28 Automatic Backup layout and per-MP4 reliability
@@ -54,7 +69,7 @@ Paired with Main 0.5.34. The displayed Fragment Storage value now comes from the
 - GOOD, FAILED and ERROR report alerts using the supplied MP3 sounds.
 - Pilot One `thermal_zone0` device-temperature monitoring through the Camera App API, including background alerts and a user-configurable warning threshold (73 °C default).
 - Opt-in smartphone contingency GPS collection in a foreground location service that is independent of Main App connection state.
-- Per-video Backup GPX prefers preserving every Camera GPX timestamp while replacing coordinates with phone fixes; if complete timestamp matching is impossible, it still saves a truthful phone-track GPX from fixes collected during that video interval.
+- Per-video Backup GPX is independent of Camera GPX point timing: Main 0.5.42 supplies the full MP4 interval, the Client uses the phone fixes actually collected in that interval, and only short gaps up to 5 seconds may be densified to 250 ms with points explicitly marked as interpolated.
 - Per-video Backup GPX files are saved directly under `dd-MM-yyyy/` as `<MP4-base-name>_backup.gpx`.
 - Complete per-day phone GPS archive at the selected Backup root: `PHONE_GPX_BACKUP_dd-MM-yyyy.gpx`.
 - Compact **Main Camera App Monitor** showing live Monitoring ON/OFF, the Main App OUTPUT folder, active purple transfer progress bars with a single activity + video filename line directly underneath, plus a short pre-transfer processing/GPX-generation line when applicable.

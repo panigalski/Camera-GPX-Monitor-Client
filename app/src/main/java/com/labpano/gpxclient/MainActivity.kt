@@ -1612,7 +1612,16 @@ class MainActivity : Activity() {
             gpxTransferWorker.execute {
                 var sent = 0
                 try {
+                    // Legacy 1.10.28/1.10.29 queue entries did not persist GOOD/FAILED status.
+                    // Resolve them against Main App's durable queue once per manual send batch so
+                    // older phone backups are still placed beside the correct camera recording.
+                    val cameraQueue = runCatching { client.fetchPendingGpx(client.normalizeAddress(server)) }
+                        .getOrDefault(emptyList())
                     pending.forEach { entry ->
+                        val status = entry.status.ifBlank {
+                            resolveBackupCameraStatus(entry.fileName, cameraQueue)
+                                ?: error("Cannot determine GOOD/FAILED/ERROR destination for ${entry.fileName}")
+                        }
                         val bytes = readBackupGpxBytes(Uri.parse(entry.documentUri))
                         val sha256 = sha256Hex(bytes)
                         require(sha256.equals(entry.sha256, ignoreCase = true)) {
@@ -1620,11 +1629,13 @@ class MainActivity : Activity() {
                         }
                         client.uploadBackupGpx(
                             baseAddress = server,
+                            status = status,
                             dateFolder = entry.dateFolder,
                             fileName = entry.fileName,
                             bytes = bytes,
                             sha256 = sha256
                         )
+                        if (entry.status.isBlank()) BackupGpxSendQueue.markStatus(this, entry.id, status)
                         BackupGpxSendQueue.markSent(this, entry.id)
                         sent++
                         postUi {
@@ -1660,6 +1671,17 @@ class MainActivity : Activity() {
             sendGpxStatus.text = "GPX send could not start: ${error.message ?: error.javaClass.simpleName}"
             updateSendGpxButton()
         }
+    }
+
+    private fun resolveBackupCameraStatus(
+        backupFileName: String,
+        cameraQueue: List<PendingGpxItem>
+    ): String? {
+        val videoBase = backupFileName
+            .replace(Regex("(?i)_backup(?: \\(\\d+\\))?\\.gpx$"), "")
+        return cameraQueue.asReversed().firstOrNull { item ->
+            File(item.videoName).nameWithoutExtension.equals(videoBase, ignoreCase = true)
+        }?.status?.trim()?.uppercase(Locale.US)?.takeIf { it == "GOOD" || it == "FAILED" || it == "ERROR" }
     }
 
     private fun readBackupGpxBytes(uri: Uri): ByteArray {
