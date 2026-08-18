@@ -999,9 +999,10 @@ class MainActivity : Activity() {
         updateReportButton(goodButton, "GOOD", dashboard.good.size, Color.rgb(46, 125, 50))
 
         val backupPrefs = getSharedPreferences(BackupGpsService.PREFS, MODE_PRIVATE)
-        backupStatus.text = if (backupPrefs.getBoolean(BackupGpsService.KEY_ENABLED, false)) {
-            backupPrefs.getString(BackupGpsService.KEY_STATUS, "Automatic backup is running")
-        } else "Automatic backup is off"
+        backupStatus.text = BackupStatusDisplayPolicy.display(
+            enabled = backupPrefs.getBoolean(BackupGpsService.KEY_ENABLED, false),
+            persistedStatus = backupPrefs.getString(BackupGpsService.KEY_STATUS, null)
+        )
         renderGpsReceiverStatus()
         updateBackupButton()
 
@@ -1541,13 +1542,10 @@ class MainActivity : Activity() {
         }
         val prefs = getSharedPreferences(BackupGpsService.PREFS, MODE_PRIVATE)
         val enabled = prefs.getBoolean(BackupGpsService.KEY_ENABLED, false)
-        backupStatus.text = if (enabled) {
-            prefs.getString(BackupGpsService.KEY_STATUS, "Automatic backup is running")
-                ?: "Automatic backup is running"
-        } else {
-            prefs.getString(BackupGpsService.KEY_STATUS, "Automatic backup is off")
-                ?: "Automatic backup is off"
-        }
+        backupStatus.text = BackupStatusDisplayPolicy.display(
+            enabled = enabled,
+            persistedStatus = prefs.getString(BackupGpsService.KEY_STATUS, null)
+        )
         if (::dailyPhoneGpxStatus.isInitialized) {
             val dailyError = prefs.getString(BackupGpsService.KEY_DAILY_GPX_ERROR, "").orEmpty()
             val dailyPath = prefs.getString(BackupGpsService.KEY_DAILY_GPX_LAST_PATH, "").orEmpty()

@@ -14,8 +14,8 @@ android {
         applicationId = "com.labpano.gpxclient"
         minSdk = 24
         targetSdk = 33
-        versionCode = 78
-        versionName = "1.10.31"
+        versionCode = 79
+        versionName = "1.10.32"
     }
     buildTypes {
         release {

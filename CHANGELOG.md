@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.10.32
+
+- Fixed Automatic Backup status flicker after stopping. Dashboard refreshes and the periodic backup-state refresh now use one shared display policy, so a stopped backup remains `Automatic backup stopped` instead of alternating with `Automatic backup is off`.
+- Added JVM regression coverage for stopped, off, running, and configuration-error backup status rendering.
+
 ## 1.10.31
 - Paired with Main App 0.5.43's date-first OUTPUT layout. Manual **Send GPX Files** uploads now resolve on the camera to `OUTPUT/dd-MM-yyyy/GOOD|FAILED|ERROR/`.
 - Keeps the phone-side Automatic Backup layout unchanged; only the camera upload destination changed.
