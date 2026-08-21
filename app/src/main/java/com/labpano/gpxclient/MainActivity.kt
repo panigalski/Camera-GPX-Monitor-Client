@@ -464,7 +464,14 @@ class MainActivity : Activity() {
                 setHorizontallyScrolling(false)
                 breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
                 hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
-                setTextIsSelectable(true)
+                // Do not make this TextView selectable/focusable. A selectable TextView
+                // can acquire focus while the dashboard is being refreshed every second;
+                // when the camera is recording, those layout passes can make ScrollView
+                // repeatedly scroll back to this section. The full path remains available
+                // through contentDescription and is rendered with normal multi-line wrapping.
+                setTextIsSelectable(false)
+                isFocusable = false
+                isFocusableInTouchMode = false
             }
             addView(outputFolderDetails)
             transfers = LinearLayout(this@MainActivity).apply {
@@ -1108,9 +1115,14 @@ class MainActivity : Activity() {
         val output = dashboard?.outputFolder.orEmpty()
             .ifBlank { dashboard?.reportHealth?.destination.orEmpty() }
             .ifBlank { "--" }
-        outputFolderDetails.text = outputFolderText(output)
-        // Preserve the exact raw value for accessibility/copy semantics; visual wrapping does not
-        // alter the path itself.
+        val rendered = outputFolderText(output)
+        // Avoid invalidating/re-laying out the ScrollView every polling cycle when the path
+        // has not changed. This is especially important while the camera is recording because
+        // the dashboard is refreshed frequently and the user may be scrolled near the bottom.
+        if (outputFolderDetails.text.toString() != rendered.toString()) {
+            outputFolderDetails.text = rendered
+        }
+        // Preserve the exact raw value for accessibility; visual wrapping does not alter it.
         outputFolderDetails.contentDescription = "Output Folder: $output"
     }
 

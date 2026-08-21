@@ -305,3 +305,8 @@
 - Moved GPS / GNSS callbacks onto a dedicated background `HandlerThread` so durable phone-GPS writes do not run on the UI thread.
 - Added a best-effort final daily GPX sync when Automatic Smartphone GPS Backup stops, while retaining the internal recoverable daily log.
 - Full source audit performed together with Camera App 0.5.16.
+
+## 1.10.34
+- Fixed dashboard ScrollView jumping back to the Output Folder section while the camera is recording.
+- Output Folder remains fully wrapped, but is no longer a selectable/focusable TextView that can steal scroll focus during live dashboard refreshes.
+- Avoided reassigning the Output Folder text when its value has not changed, reducing unnecessary layout invalidation during polling.

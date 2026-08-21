@@ -76,3 +76,6 @@ For repository setup and CI details, see [docs/BUILD.md](docs/BUILD.md).
 - `CHANGELOG.md` — version history
 
 Generated build output, Android Studio metadata, local SDK configuration, APK/AAB files, and signing material are intentionally excluded by `.gitignore`.
+
+### 1.10.34 dashboard scrolling
+The Output Folder path remains fully visible with multi-line wrapping. The path view is intentionally non-selectable/non-focusable and unchanged values are not re-laid out during dashboard polling, preventing the main ScrollView from jumping back to the Output Folder section while the camera is recording.
